@@ -5,6 +5,10 @@ import controlP5.*;
 import java.util.Calendar;
 import java.text.SimpleDateFormat;
 import processing.serial.*;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 ControlP5 cp5;
 
@@ -19,6 +23,8 @@ float v = 1.0 / ((blurSize * 2.0 + 1) * (blurSize * 2.0 + 1));
 
 PImage bufferedImage;
 
+int serialPortNumber = -1;
+
 byte[][][] pixelFrame = new byte[16][16][3];
 
 int resample_x_start = 0;
@@ -29,7 +35,71 @@ int resample_y_end = 0;
 boolean running = false;
 Textarea consoleTextarea;
 
+DropdownList portChooser;
+
+ScheduledExecutorService worker = Executors.newSingleThreadScheduledExecutor();
+
 public static final String DATE_FORMAT_NOW = "yyyy-MM-dd HH:mm:ss";
+
+void writeD(int test) {
+  comPort.write((short)( test & 0xff)/2);
+}
+
+void beginUploadImage() {
+  if (comPort == null) {
+    logError("Connect a device to upload!");
+    resetConnection();
+  } else {
+    //write header
+    logConsole("Uploading data frame...");
+    comPort.clear();
+    comPort.write(252);
+    
+    for (int y = 0; y< 16; y++) {
+      for (int x = 0; x < 16 ; x++ ) {
+        byte tempframe = 0x00;
+        tempframe += ((pixelFrame[x][y][0] & 0xE0) >> 1);
+        tempframe += ((pixelFrame[x][y][1] & 0xC0) >> 4);
+        tempframe += ((pixelFrame[x][y][2] & 0xC0) >> 6);
+        comPort.write(tempframe);
+        logConsole("writrting... " + tempframe);
+      }
+    }
+    //write end of frame
+    comPort.write(253);
+    
+    cp5.getController("serslider").setValue(75.0);
+    redraw();
+    
+    //check to see if we have an ack
+    Runnable task = new Runnable() {
+      public void run() {
+        checkUploadedImage();
+      }
+    };
+    worker.schedule(task, 1000, TimeUnit.MILLISECONDS);
+  }
+}
+
+void checkUploadedImage() {
+  if (comPort.available() == 0) {
+    logError("Device is not responding.");
+    //resetConnection();
+  } else {
+    int test = comPort.read();
+    if (test == 254) {
+      logConsole("Successfully upload image!");
+      cp5.getController("serslider").setValue(100.0);
+    } else if (test == 238) {
+      logError("Image uploaded but with errors!");
+      cp5.getController("serslider").setValue(0.0);
+    } else {
+      logError("Failed to upload image!");
+      cp5.getController("serslider").setValue(0.0);
+    }
+  }
+  comPort.clear();
+}
 
 void listSerialPorts() {
   logConsole("Finding Serial Devices....");
@@ -40,50 +110,102 @@ void listSerialPorts() {
     logConsole("Remember to connect a LED panel.");
   } else {
     logConsole("Found " + serialCount + " devices!");
+    portChooser.clear();
     for (int i=0; i < serialCount; i++){
+      portChooser.addItem(Serial.list()[i], i);
       logConsole("Found " + Serial.list()[i]);
     }
+    serialPortNumber = -1;
   }
 }
 
 void connectPanel(int serialDevice) {
-  if (serialDevice < 0 || Serial.list().length >= serialDevice) {
+  println("connecting...");
+  if (serialDevice < 0 || Serial.list().length <= serialDevice) {
     logError("Invalid device ID");
+    resetConnection();
   } else if (Serial.list().length == 0) {
     logError("No Serial Devices Found");
+    resetConnection();
   } else {
-    comPort = new Serial(this, Serial.list()[serialDevice], 115200);
+    logConsole("Polling " + Serial.list()[serialDevice]);
+    try {
+      if (comPort != null) comPort.stop();
+      comPort = new Serial(this, Serial.list()[serialDevice], 115200, 'N', 8, 1.0);
+    } catch (Exception e) {
+      //leave blan
+      logError("This device is busy!");
+      resetConnection();
+    }
     if (comPort == null) {
       logError("Error establishing connection.");
+      resetConnection();
     } else {
       //so we've passed the connectivity test
       //now let's see if we are talking to a panel and it's active
       //send SETUP sequence
-      comPort.write(0xff); // setup byte
+      comPort.clear();
+      comPort.write(255); // setup byte
       
       //wait a second
-      try {
-        Thread.sleep(1000);
-      } catch(InterruptedException ex) {
-        Thread.currentThread().interrupt();
-      }
-      if (comPort.available() == 0) {
-        logError("Device is not responding.");
-      } else {
-        //we have a response.. let's see if it's valid, now get the address
-        if (comPort.read() == 0xff) {
-          logError("This device is not a LED Panel.");
-        } else {
-          comPort.write(0xF7);//address byte
-          
-          //wait for a response
-          
-          
+      Runnable task = new Runnable() {
+        public void run() {
+          connectPartTwo();
         }
-      }
+      };
+      worker.schedule(task, 300, TimeUnit.MILLISECONDS);
     }
   }
 }
+
+void resetConnection() {
+  if (comPort != null) comPort.stop();
+  portChooser.captionLabel().set("Select Serial Port");
+  serialPortNumber = -1;
+  cp5.get(Textfield.class, "deviceName").lock().setText("No Device Connected");
+}
+
+void connectPartTwo() {
+  if (comPort.available() == 0) {
+    logError("Device is not responding.");
+    resetConnection();
+  } else {
+    logConsole("Found working serial device!");
+    //we have a response.. let's see if it's valid, now get the address
+    if (comPort.read() != 255) {
+      logError("This device is not a LED Panel.");
+      resetConnection();
+    } else {
+      logConsole("Obtaining device ID...");
+      comPort.clear();
+      comPort.write(247);//address byte
+      
+      //wait for a response
+      Runnable task = new Runnable() {
+        public void run() {
+          connectPartThree();
+        }
+      };
+      worker.schedule(task, 500, TimeUnit.MILLISECONDS);
+    }
+  }
+}
+
+void connectPartThree() {
+  if (comPort.available() == 0) {
+    logError("Device is not responding.");
+    resetConnection();
+  } else {
+    //buffer until we get the next address
+    String name = comPort.readString();
+    logConsole("Device ID = " + name);
+    cp5.get(Textfield.class, "deviceName").setText(name);
+    logConsole("PANEL CONNECTED!");
+    comPort.clear();
+    logConsole("Panel is running POST");
+  }
+}
+
 
 public static String now() {
   Calendar cal = Calendar.getInstance();
@@ -185,9 +307,12 @@ void blurImage(int pass) {
 
 // set system look and feel 
 void setup() {
+  frame.setTitle("MODULAR LED PANEL ISP TEST PROGRAM");
   PFont font = createFont("arial", 12);
-  size(800, 600);
+  size(800, 600, P2D);
   noStroke();
+  frameRate(400);
+  
   cp5 = new ControlP5(this);
   
   consoleTextarea = cp5.addTextarea("consoleLog").setPosition(10,410).setSize(780,180).setFont(createFont("arial", 12)).setLineHeight(14).setColor(color(200)).setColorBackground(color(0)).setColorForeground(color(0)).showScrollbar().setScrollForeground(color(70)).setScrollBackground(color(0));
@@ -220,6 +345,42 @@ void setup() {
   
   cp5.addButton("resampleImage").setPosition(470, 180).setSize(110, 20).setCaptionLabel("    Generate Data Frame");
   
+  cp5.addTextfield("deviceName").setPosition(380,250).setSize(260,20).setFont(font).setColor(color(200,200,200)).lock().setText("No Device Connected").setCaptionLabel("");
+  
+  cp5.addSlider("serslider").setPosition(380, 280).setSize(260, 20).setRange(0, 100).setValue(0).setCaptionLabel("Upload Progress").lock();
+  cp5.getController("serslider").getValueLabel().align(ControlP5.LEFT, ControlP5.BOTTOM_OUTSIDE).setPaddingX(0);
+  cp5.getController("serslider").getCaptionLabel().align(ControlP5.RIGHT, ControlP5.BOTTOM_OUTSIDE).setPaddingX(0);
+  
+  cp5.addKnob("knobProgSpeed").setRange(0,255).setValue(84).setPosition(650,310).setRadius(33).setDragDirection(Knob.HORIZONTAL).setCaptionLabel("Scan Speed");
+  
+  portChooser = cp5.addDropdownList("portChooserD").setPosition(379, 241).setWidth(260);
+  portChooser.setBackgroundColor(color(190));
+  portChooser.setItemHeight(20);
+  portChooser.setBarHeight(20);
+  portChooser.captionLabel().set("Select Serial Port");
+  portChooser.captionLabel().style().marginTop = 5;
+  portChooser.captionLabel().style().marginLeft = 3;
+  portChooser.valueLabel().style().marginTop = 3;
+  portChooser.setValue(9999.0);
+  //ddl.scroll(0);
+  portChooser.setColorActive(color(255, 128));
+  
+  cp5.addButton("refreshUSB").setPosition(650, 220).setSize(80, 20).setCaptionLabel("Refresh Devices").captionLabel().style().marginLeft = 2;
+  cp5.addButton("connectUSB").setPosition(740, 220).setSize(50, 20).setCaptionLabel("Connect").captionLabel().style().marginLeft = 5;
+  
+  cp5.addButton("sendImage").setPosition(650, 280).setSize(140, 20).setCaptionLabel("Send Serial Image Data Frame").captionLabel().style().marginLeft = 5;
+  
+  cp5.addButton("disconnectUSB").setPosition(730, 250).setSize(60, 20).setCaptionLabel("Disconnect").captionLabel().style().marginLeft = 4;
+  cp5.addButton("setNameUSB").setPosition(650, 250).setSize(70, 20).setCaptionLabel("Perform Test").captionLabel().style().marginLeft = 5;
+  
+  cp5.addButton("setNameUSB").setPosition(650, 250).setSize(70, 20).setCaptionLabel("Perform Test").captionLabel().style().marginLeft = 5;
+  
+  cp5.addButton("darkUpdate").setPosition(380, 340).setSize(125, 20).setCaptionLabel("Hide Update Status").captionLabel().style().marginLeft = 20;
+  cp5.addButton("scanUpdate").setPosition(515, 340).setSize(125, 20).setCaptionLabel("Show Update Status").captionLabel().style().marginLeft = 17;
+  cp5.addButton("blankOutput").setPosition(380, 370).setSize(125, 20).setCaptionLabel("Disable (Blank) Output").captionLabel().style().marginLeft = 12;
+  cp5.addButton("unblankOutput").setPosition(515, 370).setSize(125, 20).setCaptionLabel("Enable (Unblank) Output").captionLabel().style().marginLeft = 10;
+  
+  //add tooltips
   cp5.getTooltip().setDelay(500);
   cp5.getTooltip().register("loadFile","Changes the size of the ellipse.");
   
@@ -232,6 +393,167 @@ void setup() {
   
   logConsole("READY!");
   logConsole("Please open an image file to begin.");
+}
+
+void waitForAck() {
+  comPort.clear();
+
+  //wait for a response
+  Runnable task = new Runnable() {
+    public void run() {
+      _waitForAck();
+    }
+  };
+  worker.schedule(task, 200, TimeUnit.MILLISECONDS);
+}
+
+void _waitForAck () {
+  cp5.getController("darkUpdate").unlock();
+  cp5.getController("scanUpdate").unlock();
+  cp5.getController("unblankOutput").unlock();
+  cp5.getController("blankOutput").unlock();
+  if (comPort == null || comPort.available() == 0) {
+    logError("Device is not responding.");
+    resetConnection();
+  } else {
+    if (comPort.read() != 255) {
+      logError("Update failed!");
+    } else {
+      logConsole("Done");
+    }
+  }
+}
+
+void blankOutput() {
+  if (comPort == null) {
+    logError("No device connected!");
+    resetConnection();
+  } else {
+    cp5.getController("darkUpdate").lock();
+    cp5.getController("scanUpdate").lock();
+    cp5.getController("unblankOutput").lock();
+    cp5.getController("blankOutput").lock();
+    logConsole("Disabling panel output...");
+    comPort.write(242);
+    waitForAck();
+  }
+}
+
+void unblankOutput() {
+  if (comPort == null) {
+    logError("No device connected!");
+    resetConnection();
+  } else {
+    cp5.getController("darkUpdate").lock();
+    cp5.getController("scanUpdate").lock();
+    cp5.getController("unblankOutput").lock();
+    cp5.getController("blankOutput").lock();
+    logConsole("Enabling panel output...");
+    comPort.write(243);
+    waitForAck();
+  }
+}
+
+void darkUpdate() {
+  if (comPort == null) {
+    logError("No device connected!");
+    resetConnection();
+  } else {
+    cp5.getController("darkUpdate").lock();
+    cp5.getController("scanUpdate").lock();
+    cp5.getController("unblankOutput").lock();
+    cp5.getController("blankOutput").lock();
+    logError("Setting mode to dark update...");
+    comPort.write(241);
+    comPort.write(0);//address byte
+    waitForAck();
+  }
+}
+
+void scanUpdate() {
+  if (comPort == null) {
+    logError("No device connected!");
+    resetConnection();
+  } else {
+    logError("Setting mode to scanning update...");
+    comPort.write(241);
+    comPort.write(65);//address byte
+    waitForAck();
+  }
+}
+
+void knobProgSpeed(int val) {
+  if (comPort == null) {
+    logError("No device connected!");
+    resetConnection();
+  } else {
+    comPort.write(220);//address byte
+    comPort.write(val);
+  }
+}
+
+void sendImage() {
+  cp5.getController("serslider").setValue(0);
+  beginUploadImage();
+}
+
+void disconnectUSB() {
+  logConsole("Disconnecting Serial Device..");
+  resetConnection();
+  logConsole("Done.");
+}
+
+void setNameUSB() {
+  if (comPort == null) {
+    logError("No device connected!");
+    resetConnection();
+  } else {
+    logConsole("Getting Device ID");
+    comPort.clear();
+    comPort.write(247);//address byte
+    
+    //wait for a response
+    Runnable task = new Runnable() {
+      public void run() {
+        checkDeviceID();
+      }
+    };
+    worker.schedule(task, 500, TimeUnit.MILLISECONDS);
+  }
+}
+
+void checkDeviceID() {
+  if (comPort == null || comPort.available() == 0) {
+    logError("Device is not responding.");
+    resetConnection();
+  } else {
+    String name = comPort.readString();
+    logConsole("Device ID = " + name);
+    cp5.get(Textfield.class, "deviceName").setText(name);
+    logConsole("PANEL CONNECTED!");
+    comPort.clear();
+  }
+}
+
+void controlEvent(ControlEvent theEvent) {
+  if (theEvent.isGroup()) {
+    String listName = theEvent.getName();
+    if (listName.equals("portChooserD")) {
+      serialPortNumber = (int)portChooser.getValue();
+    }
+  }
+}
+
+void refreshUSB() {
+  listSerialPorts();
+}
+void connectUSB() {
+  if (serialPortNumber < 0) {
+    logError("Please Select a Serial Device!");
+  } else {
+    logConsole("Attempding to connect with device ID#" + serialPortNumber);
+    connectPanel(serialPortNumber);
+  }
 }
 
 void resampleImage() {
@@ -264,10 +586,12 @@ void resampleImage() {
       for (int x = 0; x < 16; x++) {
         // Calculate the adjacent pixel for this kernel point
         int pos = (yoffset + y*ydist)*tempimage.width + (xoffset + x*xdist);
-
-        pixelFrame[x][y][0] = (byte)red(tempimage.pixels[pos]);
-        pixelFrame[x][y][1] = (byte)green(tempimage.pixels[pos]);
-        pixelFrame[x][y][2] = (byte)blue(tempimage.pixels[pos]);
+        
+        //red gets 3 bits
+        //greena nd blue get 2 bits
+        pixelFrame[x][y][0] = (byte)((((short)red(tempimage.pixels[pos]) >> 5) & 0x07) << 5);
+        pixelFrame[x][y][1] = (byte)((((short)green(tempimage.pixels[pos]) >> 6) & 0x03) << 6);
+        pixelFrame[x][y][2] = (byte)((((short)blue(tempimage.pixels[pos]) >> 6) & 0x03) << 6);
       }
     }
     
@@ -399,6 +723,7 @@ void openImage() {
         String temp = f.getName().toLowerCase();
         return temp.endsWith(".jpg")
         || temp.endsWith(".bmp")
+        || temp.endsWith(".png")
         || f.isDirectory();
       }
       public String getDescription() {
@@ -480,3 +805,4 @@ void draw() {
 public void loadFile(int value) {
   openImage();
 }
+

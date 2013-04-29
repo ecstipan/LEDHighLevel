@@ -33,7 +33,6 @@ public class LEDPANEL extends PApplet {
 
 
 
-//import static java.util.concurrent.TimeUnit.SECONDS;
 
 
 
@@ -86,9 +85,12 @@ public void beginUploadImage() {
     
     for (int y = 0; y< 16; y++) {
       for (int x = 0; x < 16 ; x++ ) {
-        writeD(pixelFrame[x][y][0]);
-        writeD(pixelFrame[x][y][1]);
-        writeD(pixelFrame[x][y][2]);
+        byte tempframe = 0x00;
+        tempframe += ((pixelFrame[x][y][0] & 0xE0) >> 1);
+        tempframe += ((pixelFrame[x][y][1] & 0xC0) >> 4);
+        tempframe += ((pixelFrame[x][y][2] & 0xC0) >> 6);
+        comPort.write(tempframe);
+        logConsole("writrting... " + tempframe);
       }
     }
     //write end of frame
@@ -338,6 +340,7 @@ public void setup() {
   size(800, 600, P2D);
   noStroke();
   frameRate(400);
+  
   cp5 = new ControlP5(this);
   
   consoleTextarea = cp5.addTextarea("consoleLog").setPosition(10,410).setSize(780,180).setFont(createFont("arial", 12)).setLineHeight(14).setColor(color(200)).setColorBackground(color(0)).setColorForeground(color(0)).showScrollbar().setScrollForeground(color(70)).setScrollBackground(color(0));
@@ -611,10 +614,12 @@ public void resampleImage() {
       for (int x = 0; x < 16; x++) {
         // Calculate the adjacent pixel for this kernel point
         int pos = (yoffset + y*ydist)*tempimage.width + (xoffset + x*xdist);
-
-        pixelFrame[x][y][0] = (byte)((((short)red(tempimage.pixels[pos]) >> 7 ) & 0x01) * 255);
-        pixelFrame[x][y][1] = (byte)((((short)green(tempimage.pixels[pos]) >> 7 ) & 0x01) * 255);
-        pixelFrame[x][y][2] = (byte)((((short)blue(tempimage.pixels[pos]) >> 7 ) & 0x01) * 255);
+        
+        //red gets 3 bits
+        //greena nd blue get 2 bits
+        pixelFrame[x][y][0] = (byte)((((short)red(tempimage.pixels[pos]) >> 5) & 0x07) << 5);
+        pixelFrame[x][y][1] = (byte)((((short)green(tempimage.pixels[pos]) >> 6) & 0x03) << 6);
+        pixelFrame[x][y][2] = (byte)((((short)blue(tempimage.pixels[pos]) >> 6) & 0x03) << 6);
       }
     }
     
@@ -828,6 +833,7 @@ public void draw() {
 public void loadFile(int value) {
   openImage();
 }
+
   static public void main(String[] passedArgs) {
     String[] appletArgs = new String[] { "LEDPANEL" };
     if (passedArgs != null) {

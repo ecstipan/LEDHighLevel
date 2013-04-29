@@ -36,7 +36,7 @@
     <key>Java</key>
     <dict>
       <key>VMOptions</key>
-      <string> -Xms64m -Xmx1024m</string>
+      <string> -Xms64m -Xmx3000m</string>
 
       <key>MainClass</key>
       <string>LEDPANEL</string>
